@@ -1,10 +1,10 @@
 import asyncio
 from viam.module.module import Module
 try:
-    from models.wake_word_filter import WakeWordFilter
+    from models.trigger import Trigger
 except ModuleNotFoundError:
     # when running as local module with run.sh
-    from .models.wake_word_filter import WakeWordFilter
+    from .models.trigger import Trigger
 
 
 if __name__ == '__main__':

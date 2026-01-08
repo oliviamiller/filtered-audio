@@ -1,0 +1,13 @@
+{
+  "module_name": "filter-mic",
+  "namespace": "viam",
+  "language": "python",
+  "resource_type": "component",
+  "resource_subtype": "sensor",
+  "model_name": "trigger",
+  "enable_cloud_build": true,
+  "initialize_git": false,
+  "generator_version": "0.1.0",
+  "generated_on": "2025-12-16T16:49:07.6297Z",
+  "module_readme_link": "README.md"
+}

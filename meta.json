@@ -1,18 +1,13 @@
 {
   "$schema": "https://dl.viam.dev/module.schema.json",
-  "module_id": "viam:filtered-audio",
+  "module_id": "viam:filter-mic",
   "visibility": "public",
-  "url": "https://github.com/viam-modules/filtered-audio",
-  "description": "audio filters from a source microphone",
-  "models": [
-    {
-      "api": "rdk:component:audio_in",
-      "model": "viam:filtered-audio:wake-word-filter",
-      "markdown_link": "",
-      "short_description": "filters audio stream based on wake word detection"
-    }
-  ],
+  "url": "",
+  "description": "Modular sensor component: trigger",
+  "applications": null,
+  "markdown_link": "README.md",
   "entrypoint": "dist/main",
+  "first_run": "",
   "build": {
     "build": "./build.sh",
     "setup": "./setup.sh",
@@ -20,7 +15,8 @@
     "arch": [
       "linux/amd64",
       "linux/arm64",
-      "darwin/arm64"
+      "darwin/arm64",
+      "windows/amd64"
     ]
   }
 }

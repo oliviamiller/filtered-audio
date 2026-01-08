@@ -5,4 +5,3 @@ typing-extensions
 webrtcvad
 vosk~=0.3.44
 pydub~=0.25.1
-certifi

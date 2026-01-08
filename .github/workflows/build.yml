@@ -1,0 +1,17 @@
+name: Build Test
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: viamrobotics/build-action@v1
+        with:
+          version: ""  # Empty = build only, no deploy
+          ref: ${{ github.sha }}

@@ -198,11 +198,11 @@ async def main():
 
     # Connect to your robot - update these credentials
     opts = RobotClient.Options.with_api_key(
-        api_key='yn2v121yklqjfduvse718fn582dskzi1',
-        api_key_id='d04e49b3-7799-4afe-ba3a-a5b35d802b17'
+        api_key='',
+        api_key_id=''
     )
 
-    robot = await RobotClient.at_address('xarm-main.aqb785vhl4.viam.cloud', opts)
+    robot = await RobotClient.at_address('', opts)
 
     try:
         assistant = ElevenLabsVoiceAssistant(

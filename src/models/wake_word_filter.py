@@ -32,8 +32,9 @@ from .vosk import get_vosk_model, DEFAULT_VOSK_MODEL
 
 # Default configuration values
 DEFAULT_VAD_AGGRESSIVENESS = 3  # 0-3, higher = less sensitive
+DEFAULT_SILENCE_DURATION_MS = 900  # milliseconds of silence before ending a speech segment
 AUDIO_SAMPLE_RATE_HZ = 16000
-MAX_BUFFER_SIZE_BYTES = 500000  # ~15 seconds at 16kHz
+MAX_BUFFER_SIZE_BYTES = 480000  # ~15 seconds at 16kHz
 
 
 class WakeWordFilter(AudioIn, EasyResource):
@@ -50,6 +51,7 @@ class WakeWordFilter(AudioIn, EasyResource):
     is_shutting_down: bool
     microphone_client: AudioIn
     fuzzy_matcher: Optional[FuzzyWakeWordMatcher]
+    silence_duration_ms: int
 
     @classmethod
     def new(
@@ -85,6 +87,13 @@ class WakeWordFilter(AudioIn, EasyResource):
             )
         else:
             instance.fuzzy_matcher = None
+
+        instance.silence_duration_ms = int(
+            attrs.get("silence_duration_ms", DEFAULT_SILENCE_DURATION_MS)
+        )
+        instance.logger.info(
+            f"VAD Silence duration: {instance.silence_duration_ms}ms"
+        )
 
         # Initialize WebRTC VAD
         instance.vad = webrtcvad.Vad(vad_aggressiveness)
@@ -291,10 +300,12 @@ class WakeWordFilter(AudioIn, EasyResource):
             is_speech_active = False
             silence_frames = 0
             speech_frames = 0  # Track how much speech we've heard
-            max_silence_frames = 30  # ~1 second of silence to end speech segment
+            frame_duration_ms = 30
+            max_silence_frames = self.silence_duration_ms // frame_duration_ms
             min_speech_frames = (
                 10  # Require at least 300ms of speech (~10 frames @ 30ms each)
             )
+
 
             async for audio_chunk in mic_stream:
                 # Exit stream if shutting down
@@ -431,7 +442,9 @@ class WakeWordFilter(AudioIn, EasyResource):
             bool: True if any wake word detected
         """
         try:
-            recognizer = KaldiRecognizer(self.vosk_model, sample_rate)
+            # Use grammar to constrain recognition to wake words for better accuracy
+            grammar = json.dumps(self.wake_words)
+            recognizer = KaldiRecognizer(self.vosk_model, sample_rate, grammar)
             recognizer.AcceptWaveform(audio_bytes)
             result = json.loads(recognizer.FinalResult())
 

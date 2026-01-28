@@ -4,9 +4,14 @@ from PyInstaller.utils.hooks import collect_all
 
 datas = [
     ('vosk_models', 'vosk_models'),  # Bundled Vosk models
+    ('oww_models', 'oww_models'),    # Bundled OpenWakeWord models
 ]
 binaries = []
-hiddenimports = ['googleapiclient']
+hiddenimports = ['googleapiclient', 'numpy', 'numpy.core', 'numpy.core._methods', 'numpy.lib', 'numpy.lib.format']
+
+# Collect numpy first since other packages depend on it
+tmp_ret = collect_all('numpy')
+datas += tmp_ret[0]; binaries += tmp_ret[1]; hiddenimports += tmp_ret[2]
 
 tmp_ret = collect_all('vosk')
 datas += tmp_ret[0]; binaries += tmp_ret[1]; hiddenimports += tmp_ret[2]
@@ -15,6 +20,12 @@ tmp_ret = collect_all('webrtcvad')
 datas += tmp_ret[0]; binaries += tmp_ret[1]; hiddenimports += tmp_ret[2]
 
 tmp_ret = collect_all('rapidfuzz')
+datas += tmp_ret[0]; binaries += tmp_ret[1]; hiddenimports += tmp_ret[2]
+
+tmp_ret = collect_all('openwakeword')
+datas += tmp_ret[0]; binaries += tmp_ret[1]; hiddenimports += tmp_ret[2]
+
+tmp_ret = collect_all('onnxruntime')
 datas += tmp_ret[0]; binaries += tmp_ret[1]; hiddenimports += tmp_ret[2]
 
 tmp_ret = collect_all('viam')

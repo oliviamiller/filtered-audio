@@ -7,3 +7,5 @@ vosk~=0.3.44
 pydub~=0.25.1
 certifi==2025.11.12
 rapidfuzz~=3.14.3
+openwakeword~=0.6.0
+numpy==1.26.4

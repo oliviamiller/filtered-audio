@@ -12,10 +12,15 @@ from typing import (
 import asyncio
 import json
 import logging
+import os
 import re
+import sys
 from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
 from vosk import Model as VoskModel, KaldiRecognizer
 import webrtcvad
+import numpy as np
+from openwakeword.model import Model as OWWModel
 from typing_extensions import Self
 
 from .fuzzy_matcher import FuzzyWakeWordMatcher
@@ -35,6 +40,121 @@ DEFAULT_VAD_AGGRESSIVENESS = 3  # 0-3, higher = less sensitive
 DEFAULT_SILENCE_DURATION_MS = 900  # milliseconds of silence before ending a speech segment
 AUDIO_SAMPLE_RATE_HZ = 16000
 MAX_BUFFER_SIZE_BYTES = 480000  # ~15 seconds at 16kHz
+DEFAULT_MIN_SPEECH_MS = 300
+
+
+def _get_bundled_oww_models_dir() -> str:
+    """Get the path to bundled OpenWakeWord models, handling PyInstaller bundles."""
+    if getattr(sys, "frozen", False) and hasattr(sys, "_MEIPASS"):
+        base_path = Path(sys._MEIPASS)
+    else:
+        # Running in development
+        base_path = Path(__file__).resolve().parents[2]
+    return str(base_path / "oww_models")
+
+
+# OpenWakeWord model download URLs
+OWW_MODEL_URLS = {
+    "alexa_v0.1": "https://github.com/dscripka/openWakeWord/releases/download/v0.5.1/alexa_v0.1.tflite",
+    "hey_jarvis_v0.1": "https://github.com/dscripka/openWakeWord/releases/download/v0.5.1/hey_jarvis_v0.1.tflite",
+    "hey_mycroft_v0.1": "https://github.com/dscripka/openWakeWord/releases/download/v0.5.1/hey_mycroft_v0.1.tflite",
+    "hey_rhasspy_v0.1": "https://github.com/dscripka/openWakeWord/releases/download/v0.5.1/hey_rhasspy_v0.1.tflite",
+}
+
+# Base models required by OpenWakeWord
+OWW_BASE_MODEL_URLS = {
+    "melspectrogram": "https://github.com/dscripka/openWakeWord/releases/download/v0.5.1/melspectrogram.tflite",
+    "embedding_model": "https://github.com/dscripka/openWakeWord/releases/download/v0.5.1/embedding_model.tflite",
+}
+
+
+def _download_file(url: str, dest_path: str, logger: logging.Logger) -> None:
+    """Download a file from URL to destination path."""
+    import ssl
+    import urllib.request
+    import certifi
+
+    ssl_context = ssl.create_default_context(cafile=certifi.where())
+    try:
+        with urllib.request.urlopen(url, context=ssl_context, timeout=120) as response:
+            with open(dest_path, "wb") as out_file:
+                while True:
+                    chunk = response.read(8192)
+                    if not chunk:
+                        break
+                    out_file.write(chunk)
+    except Exception as e:
+        logger.error(f"Failed to download {url}: {e}")
+        raise RuntimeError(f"Failed to download {url}: {e}")
+
+
+def _setup_oww_models(model_name: str, logger: logging.Logger) -> str:
+    """
+    Setup OpenWakeWord models, copying/downloading to openwakeword's expected location.
+
+    Returns:
+        Path to the wakeword model file
+    """
+    import shutil
+    import openwakeword
+
+    bundled_dir = _get_bundled_oww_models_dir()
+    data_path = os.getenv("VIAM_MODULE_DATA")
+
+    # Get openwakeword's expected model directory
+    oww_pkg_dir = os.path.dirname(openwakeword.__file__)
+    oww_models_dir = os.path.join(oww_pkg_dir, "resources", "models")
+    os.makedirs(oww_models_dir, exist_ok=True)
+
+    def ensure_model(name: str, urls: dict, is_base: bool = False) -> str:
+        """Ensure model exists in openwakeword's expected location."""
+        # Determine filename
+        if name in urls:
+            filename = urls[name].split("/")[-1]
+        else:
+            filename = f"{name}.tflite"
+
+        target_path = os.path.join(oww_models_dir, filename)
+
+        # Already in place?
+        if os.path.exists(target_path):
+            logger.debug(f"Model already exists: {target_path}")
+            return target_path
+
+        # Check bundled
+        for ext in [".tflite", ".onnx"]:
+            bundled_path = os.path.join(bundled_dir, f"{name}{ext}")
+            if os.path.exists(bundled_path):
+                logger.info(f"Copying bundled model to {target_path}")
+                shutil.copy2(bundled_path, target_path)
+                return target_path
+
+        # Check VIAM_MODULE_DATA cache
+        if data_path:
+            for ext in [".tflite", ".onnx"]:
+                cached = os.path.join(data_path, f"{name}{ext}")
+                if os.path.exists(cached):
+                    logger.info(f"Copying cached model to {target_path}")
+                    shutil.copy2(cached, target_path)
+                    return target_path
+
+        # Download
+        if name not in urls:
+            raise RuntimeError(
+                f"Unknown model: {name}. Available: {list(urls.keys())}"
+            )
+
+        url = urls[name]
+        logger.info(f"Downloading {name} from {url}...")
+        _download_file(url, target_path, logger)
+        return target_path
+
+    # Setup base models first
+    ensure_model("melspectrogram", OWW_BASE_MODEL_URLS, is_base=True)
+    ensure_model("embedding_model", OWW_BASE_MODEL_URLS, is_base=True)
+
+    # Setup wakeword model
+    return ensure_model(model_name, OWW_MODEL_URLS)
 
 
 class WakeWordFilter(AudioIn, EasyResource):
@@ -52,6 +172,9 @@ class WakeWordFilter(AudioIn, EasyResource):
     microphone_client: AudioIn
     fuzzy_matcher: Optional[FuzzyWakeWordMatcher]
     silence_duration_ms: int
+    oww_model: Optional[OWWModel]
+    oww_threshold: float
+    min_speech_ms:int
 
     @classmethod
     def new(
@@ -94,6 +217,27 @@ class WakeWordFilter(AudioIn, EasyResource):
         instance.logger.info(
             f"VAD Silence duration: {instance.silence_duration_ms}ms"
         )
+
+        instance.min_speech_ms = int(attrs.get("min_speech_ms", DEFAULT_MIN_SPEECH_MS))
+
+
+        # OpenWakeWord - if openwakeword_model is set, use it instead of Vosk
+        oww_model_name = attrs.get("openwakeword_model", None)
+        if oww_model_name:
+            model_path = _setup_oww_models(oww_model_name, instance.logger)
+            inference_framework = "tflite" if model_path.endswith(".tflite") else "onnx"
+            instance.oww_model = OWWModel(
+                wakeword_models=[model_path],
+                inference_framework=inference_framework
+            )
+            instance.oww_threshold = float(attrs.get("openwakeword_threshold", 0.5))
+            instance.logger.info(
+                f"OpenWakeWord enabled with model={oww_model_name}, "
+                f"threshold={instance.oww_threshold}"
+            )
+        else:
+            instance.oww_model = None
+            instance.oww_threshold = 0.5
 
         # Initialize WebRTC VAD
         instance.vad = webrtcvad.Vad(vad_aggressiveness)
@@ -228,6 +372,61 @@ class WakeWordFilter(AudioIn, EasyResource):
                 return
             raise
 
+    def _check_oww_wake_word(self, audio_bytes: bytes) -> bool:
+        """
+        Check if wake word is detected at start of audio using OpenWakeWord.
+
+        Only checks the first 2 seconds to ensure wake word is at the beginning.
+        """
+        chunk_size = 2560  # 80ms at 16kHz (1280 samples * 2 bytes)
+        # Only check first 2 seconds (32000 bytes at 16kHz, 16-bit)
+        max_check_bytes = 32000
+        check_bytes = min(len(audio_bytes), max_check_bytes)
+
+        max_score = 0.0
+        detected_word = None
+
+        # Reset OWW model state for fresh detection
+        self.oww_model.reset()
+
+        # Process audio in chunks (only first 2 seconds)
+        for i in range(0, check_bytes - chunk_size + 1, chunk_size):
+            chunk = audio_bytes[i:i + chunk_size]
+            audio_array = np.frombuffer(chunk, dtype=np.int16)
+            prediction = self.oww_model.predict(audio_array)
+
+            for wake_word, score in prediction.items():
+                if score > max_score:
+                    max_score = score
+                    detected_word = wake_word
+                if score >= self.oww_threshold:
+                    self.logger.info(
+                        f"OWW detected '{wake_word}' "
+                        f"(score={score:.3f} >= {self.oww_threshold})"
+                    )
+                    return True
+
+        # Check if wake word appears later - only warn if above threshold
+        if len(audio_bytes) > max_check_bytes:
+            for i in range(max_check_bytes, len(audio_bytes) - chunk_size + 1, chunk_size):
+                chunk = audio_bytes[i:i + chunk_size]
+                audio_array = np.frombuffer(chunk, dtype=np.int16)
+                prediction = self.oww_model.predict(audio_array)
+                time_sec = i / 32000
+                for wake_word, score in prediction.items():
+                    if score >= self.oww_threshold:
+                        self.logger.warning(
+                            f"OWW: '{wake_word}' at {time_sec:.1f}s "
+                            f"(score={score:.3f}) - TRIGGERED LATE"
+                        )
+                        return True
+
+        self.logger.debug(
+            f"OWW max score in first 2s: {max_score:.3f} for '{detected_word}', "
+            f"threshold: {self.oww_threshold}"
+        )
+        return False
+
     async def get_audio(
         self, codec: str, duration_seconds: float, previous_timestamp_ns: int, **kwargs
     ) -> StreamWithIterator:
@@ -302,10 +501,7 @@ class WakeWordFilter(AudioIn, EasyResource):
             speech_frames = 0  # Track how much speech we've heard
             frame_duration_ms = 30
             max_silence_frames = self.silence_duration_ms // frame_duration_ms
-            min_speech_frames = (
-                10  # Require at least 300ms of speech (~10 frames @ 30ms each)
-            )
-
+            min_speech_frames =  self.min_speech_ms // 30
 
             async for audio_chunk in mic_stream:
                 # Exit stream if shutting down
@@ -355,6 +551,7 @@ class WakeWordFilter(AudioIn, EasyResource):
                             speech_chunk_buffer.append(audio_chunk)
                             chunk_added = True
                         speech_buffer.extend(frame)
+
                     else:
                         if is_speech_active:
                             # Buffer silence frames during active speech segment
@@ -380,12 +577,35 @@ class WakeWordFilter(AudioIn, EasyResource):
                     # Only process if we had enough speech (filters out brief false positives)
                     if speech_frames >= min_speech_frames:
                         self.logger.debug(
-                            f"Speech segment ended ({speech_frames} frames), checking for wake word"
+                            f"Speech segment ended ({speech_frames} frames, "
+                            f"{len(speech_buffer)} bytes), checking for wake word"
                         )
-                        async for chunk in self._process_speech_segment(
-                            speech_chunk_buffer, speech_buffer
-                        ):
-                            yield chunk
+                        if self.oww_model:
+                            # Run OWW on full segment
+                            oww_detected = self._check_oww_wake_word(
+                                bytes(speech_buffer)
+                            )
+                            if oww_detected:
+                                self.logger.info(
+                                    f"Yielding {len(speech_chunk_buffer)} chunks "
+                                    f"({len(speech_buffer)} bytes) - OWW detected"
+                                )
+                                for chunk in speech_chunk_buffer:
+                                    yield chunk
+                                empty_response = AudioChunk()
+                                empty_response.audio.audio_data = b""
+                                yield empty_response
+                            else:
+                                self.logger.debug(
+                                    f"OWW wake word not detected, discarding. "
+                                    f"Threshold: {self.oww_threshold}"
+                                )
+                        else:
+                            # Use Vosk for wake word detection
+                            async for chunk in self._process_speech_segment(
+                                speech_chunk_buffer, speech_buffer
+                            ):
+                                yield chunk
                     else:
                         self.logger.debug(
                             f"Ignoring false positive: only {speech_frames} frames detected"
@@ -401,11 +621,23 @@ class WakeWordFilter(AudioIn, EasyResource):
 
                 # Prevent buffer from growing too large, process when it gets to max size
                 if len(speech_buffer) > MAX_BUFFER_SIZE_BYTES:
-                    self.logger.debug("Processing speech segment")
-                    async for chunk in self._process_speech_segment(
-                        speech_chunk_buffer, speech_buffer
-                    ):
-                        yield chunk
+                    self.logger.debug("Buffer exceeded max size, processing")
+                    if self.oww_model:
+                        if self._check_oww_wake_word(bytes(speech_buffer)):
+                            self.logger.info(
+                                f"Yielding {len(speech_chunk_buffer)} chunks "
+                                f"({len(speech_buffer)} bytes) - OWW (max buffer)"
+                            )
+                            for chunk in speech_chunk_buffer:
+                                yield chunk
+                            empty_response = AudioChunk()
+                            empty_response.audio.audio_data = b""
+                            yield empty_response
+                    else:
+                        async for chunk in self._process_speech_segment(
+                            speech_chunk_buffer, speech_buffer
+                        ):
+                            yield chunk
 
                     speech_chunk_buffer.clear()
                     speech_buffer.clear()
@@ -419,10 +651,18 @@ class WakeWordFilter(AudioIn, EasyResource):
                 self.logger.debug(
                     f"Stream ended with {len(speech_buffer)} bytes buffered, processing"
                 )
-                async for chunk in self._process_speech_segment(
-                    speech_chunk_buffer, speech_buffer
-                ):
-                    yield chunk
+                if self.oww_model:
+                    if self._check_oww_wake_word(bytes(speech_buffer)):
+                        for chunk in speech_chunk_buffer:
+                            yield chunk
+                        empty_response = AudioChunk()
+                        empty_response.audio.audio_data = b""
+                        yield empty_response
+                else:
+                    async for chunk in self._process_speech_segment(
+                        speech_chunk_buffer, speech_buffer
+                    ):
+                        yield chunk
             elif speech_chunk_buffer:
                 self.logger.debug(
                     f"Stream ended: ignoring buffered audio (only {speech_frames} frames, likely false positive)"
@@ -445,10 +685,20 @@ class WakeWordFilter(AudioIn, EasyResource):
             # Use grammar to constrain recognition to wake words for better accuracy
             grammar = json.dumps(self.wake_words)
             recognizer = KaldiRecognizer(self.vosk_model, sample_rate, grammar)
+            recognizer.SetWords(True)  # Enable word-level confidence scores
             recognizer.AcceptWaveform(audio_bytes)
             result = json.loads(recognizer.FinalResult())
 
             text = result.get("text", "").lower()
+
+            # Check confidence if available (reject low-confidence matches)
+            min_confidence = 0.7
+            if "result" in result and result["result"]:
+                avg_conf = sum(w.get("conf", 1.0) for w in result["result"]) / len(result["result"])
+                self.logger.debug(f"Vosk confidence: {avg_conf:.2f}")
+                if avg_conf < min_confidence:
+                    self.logger.debug(f"Rejecting low confidence match: '{text}' (conf={avg_conf:.2f} < {min_confidence})")
+                    return False
 
             if text:
                 self.logger.debug(f"Recognized text: '{text}'")
@@ -467,10 +717,10 @@ class WakeWordFilter(AudioIn, EasyResource):
                         )
                         return True
                 else:
-                    # search for exact wake word match at start of text
-                    pattern = rf"^\b{re.escape(wake_word)}\b"
+                    # search for exact wake word match anywhere in text
+                    pattern = rf"\b{re.escape(wake_word)}\b"
                     if re.search(pattern, text):
-                        self.logger.info(f"Wake word '{wake_word}' detected")
+                        self.logger.info(f"Wake word '{wake_word}' detected in: '{text}'")
                         return True
 
             return False

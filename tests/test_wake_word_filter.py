@@ -100,31 +100,33 @@ def test_validate_config_empty_microphone():
             WakeWordFilter.validate_config(config)
 
 
-def test_validate_config_missing_wake_words():
-    """Test validate_config raises error when wake_words is missing"""
+def test_validate_config_accepts_missing_wake_words():
+    """Test validate_config accepts missing wake_words (all speech mode)"""
     config = Mock()
     config.attributes = Mock()
 
     with patch("src.models.wake_word_filter.struct_to_dict") as mock_struct:
         mock_struct.return_value = {
             "source_microphone": "mic1"
-            # wake_words missing
+            # wake_words missing - should be valid
         }
 
-        with pytest.raises(ValueError, match="wake_words attribute is required"):
-            WakeWordFilter.validate_config(config)
+        deps, errors = WakeWordFilter.validate_config(config)
+        assert deps == ["mic1"]
+        assert not errors
 
 
-def test_validate_config_empty_wake_words():
-    """Test validate_config raises error when wake_words is empty list"""
+def test_validate_config_accepts_empty_wake_words():
+    """Test validate_config accepts empty wake_words list (all speech mode)"""
     config = Mock()
     config.attributes = Mock()
 
     with patch("src.models.wake_word_filter.struct_to_dict") as mock_struct:
         mock_struct.return_value = {"source_microphone": "mic1", "wake_words": []}
 
-        with pytest.raises(ValueError, match="wake_words attribute is required"):
-            WakeWordFilter.validate_config(config)
+        deps, errors = WakeWordFilter.validate_config(config)
+        assert deps == ["mic1"]
+        assert not errors
 
 
 def test_validate_config_rejects_non_string_wake_words(mock_env):
@@ -232,6 +234,21 @@ def test_validate_config_rejects_non_int_silence_duration_ms(mock_env):
         WakeWordFilter.validate_config(config)
 
 
+def test_validate_config_rejects_non_positive_silence_duration_ms(mock_env):
+    """Test validate_config raises error when silence_duration_ms is not positive"""
+    config = Mock()
+    config.attributes = Mock()
+
+    mock_env["struct_to_dict"].return_value = {
+        "source_microphone": "mic",
+        "wake_words": ["robot"],
+        "silence_duration_ms": 0,
+    }
+
+    with pytest.raises(ValueError, match="silence_duration_ms must be positive"):
+        WakeWordFilter.validate_config(config)
+
+
 def test_validate_config_rejects_non_int_min_speech_ms(mock_env):
     """Test validate_config raises error when min_speech_ms not an int"""
     config = Mock()
@@ -244,6 +261,21 @@ def test_validate_config_rejects_non_int_min_speech_ms(mock_env):
     }
 
     with pytest.raises(ValueError, match="min_speech_ms must be a whole number"):
+        WakeWordFilter.validate_config(config)
+
+
+def test_validate_config_rejects_non_positive_min_speech_ms(mock_env):
+    """Test validate_config raises error when min_speech_ms is not positive"""
+    config = Mock()
+    config.attributes = Mock()
+
+    mock_env["struct_to_dict"].return_value = {
+        "source_microphone": "mic",
+        "wake_words": ["robot"],
+        "min_speech_ms": -100,
+    }
+
+    with pytest.raises(ValueError, match="min_speech_ms must be positive"):
         WakeWordFilter.validate_config(config)
 
 def test_validate_config_accepts_valid_silence_duration_ms(mock_env):
@@ -422,6 +454,38 @@ def test_new_with_wake_word_list(mock_env):
     instance = WakeWordFilter.new(config, dependencies)
 
     assert instance.wake_words == ["hey robot", "ok robot", "computer"]
+
+
+def test_new_with_empty_wake_words(mock_env):
+    """Test new() with empty wake_words enables all-speech mode"""
+    config = Mock()
+    mic = AsyncMock()
+
+    mock_env["struct_to_dict"].return_value = {
+        "source_microphone": "mic1",
+        "wake_words": [],
+    }
+
+    dependencies = {"mic1": mic}
+    instance = WakeWordFilter.new(config, dependencies)
+
+    assert instance.wake_words == []
+
+
+def test_new_with_missing_wake_words(mock_env):
+    """Test new() with missing wake_words enables all-speech mode"""
+    config = Mock()
+    mic = AsyncMock()
+
+    mock_env["struct_to_dict"].return_value = {
+        "source_microphone": "mic1",
+        # wake_words not specified
+    }
+
+    dependencies = {"mic1": mic}
+    instance = WakeWordFilter.new(config, dependencies)
+
+    assert instance.wake_words == []
 
 
 def test_new_uses_default_vad_aggressiveness(mock_env):

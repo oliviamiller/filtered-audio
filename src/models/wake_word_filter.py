@@ -76,6 +76,11 @@ class WakeWordFilter(AudioIn, EasyResource):
         else:
             instance.wake_words = []
 
+        if instance.wake_words:
+            instance.logger.info("Wake words: %s", instance.wake_words)
+        else:
+            instance.logger.info("No wake words configured - all speech will be sent")
+
         model = str(attrs.get("vosk_model", DEFAULT_VOSK_MODEL))
         vad_aggressiveness = int(
             attrs.get("vad_aggressiveness", DEFAULT_VAD_AGGRESSIVENESS)
@@ -165,11 +170,8 @@ class WakeWordFilter(AudioIn, EasyResource):
             raise ValueError("source_microphone attribute must be a string")
         deps.append(mic)
 
+        # Validate wake_words (optional - if empty, all speech is sent)
         wake_words: Any = attrs.get("wake_words", [])
-        if wake_words == []:
-            raise ValueError("wake_words attribute is required")
-
-        # Validate wake_words are strings
         if isinstance(wake_words, str):
             # Single string is valid
             pass
@@ -268,6 +270,19 @@ class WakeWordFilter(AudioIn, EasyResource):
             return
 
         try:
+            # If no wake words configured, send all speech
+            if not self.wake_words:
+                self.logger.debug(
+                    "No wake words configured, yielding %d chunks (%d bytes)",
+                    len(speech_chunk_buffer), len(speech_buffer)
+                )
+                for chunk in speech_chunk_buffer:
+                    yield chunk
+                empty_response = AudioChunk()
+                empty_response.audio.audio_data = b""
+                yield empty_response
+                return
+
             wake_word_detected = await asyncio.get_running_loop().run_in_executor(
                 self.executor,
                 self._check_for_wake_word,
@@ -277,7 +292,8 @@ class WakeWordFilter(AudioIn, EasyResource):
 
             if wake_word_detected:
                 self.logger.info(
-                    f"Wake word detected! Yielding {len(speech_chunk_buffer)} chunks ({len(speech_buffer)} bytes)"
+                    "Wake word detected! Yielding %d chunks (%d bytes)",
+                    len(speech_chunk_buffer), len(speech_buffer)
                 )
                 for chunk in speech_chunk_buffer:
                     yield chunk

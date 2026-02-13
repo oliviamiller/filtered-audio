@@ -14,6 +14,7 @@ import json
 import logging
 import os
 import re
+import sys
 import pathlib
 import ssl
 import tempfile
@@ -207,7 +208,7 @@ class WakeWordFilter(AudioIn, EasyResource):
             instance.oww_model = OWWModel(
                 wakeword_models=[oww_model_path],
                 inference_framework="onnx",
-                enable_speex_noise_suppression=True,
+                enable_speex_noise_suppression=(sys.platform == "linux"),
             )
 
             # Derive model name the same way openwakeword does internally:
